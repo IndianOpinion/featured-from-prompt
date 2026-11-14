@@ -21,10 +21,9 @@ news items, notes, round-ups. Without a featured image they look broken in
 archive grids, in share previews and in feed readers. The usual answers each
 go wrong:
 
-- A single site-wide placeholder makes every such post look the same. On a
-  busy news site one shared placeholder ended up as the featured image of a
-  large share of posts, and every one of their share previews was the same
-  branded slab.
+- A single site-wide placeholder makes every such post look the same. Once
+  it is the featured image of many posts, every one of their share previews
+  is the same branded slab.
 - A placeholder is a real file of a perfectly good size and shape, so code
   that asks "is this featured image usable?" by size alone says yes, and the
   post is never offered anything better.
@@ -413,7 +412,11 @@ Every check uses the real bytes, never the request or the hints.
     featured through the media modal instead of Accept, the plugin treats it
     as an Accept (state, supersede, action) on the
     `updated_post_meta`/`added_post_meta` hook for the thumbnail key, guarded
-    against re-entry (case 85).
+    against re-entry (case 85). In that path the plugin only records the
+    editor's own choice; it never sets the featured image itself. Only a
+    person can make a generated image featured: through Accept (panel, REST
+    or WP-CLI) or through this deliberate pick in the media modal. No
+    trigger, worker, backfill, placeholder policy or clean-up ever does.
 
 ### 4.9 Placeholder policy
 
@@ -1054,8 +1057,9 @@ layer and an in-memory provider double unless stated.
 67. A transient failure sets no placeholder until the last attempt.
 68. The filter returning another image ID uses it; returning a non-image ID
     is ignored and logged; returning 0 sets none.
-69. A placeholder of 1200 by 675 is reported by `is_placeholder()` and
-    never counted as a usable image; the filter can add another ID.
+69. A listed placeholder of an ordinary size and wide shape is reported by
+    `is_placeholder()` and never counted as a usable image; the filter can
+    add another ID.
 70. A post on a placeholder is eligible for auto requests and reported as
     having no image; Accept replaces the placeholder.
 71. The placeholder action fires once with the record.
@@ -1092,7 +1096,10 @@ layer and an in-memory provider double unless stated.
     a switch turned off in the database stops the next guard check.
 89. On multisite, caps and queues of two sites are independent.
 
-Also tested, outside the numbered cases: uninstall removes what section 6
+Also tested, outside the numbered cases: a sweep over every trigger, the
+worker, backfill, the placeholder policy and clean-up proves that none of
+them ever sets a generated image as the featured image, and that only
+Accept or the media modal pick by a person does; uninstall removes what section 6
 lists and keeps accepted images with their meta; secrets never appear in
 logs, REST responses, records or exception messages; every admin form
 rejects a bad nonce; every REST route rejects a user without the
