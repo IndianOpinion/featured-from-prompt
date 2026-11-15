@@ -1,0 +1,53 @@
+{
+    "name": "indianopinion/featured-from-prompt",
+    "description": "WordPress plugin: suggests a featured image generated from a prompt built from the post, through any image API, held for an editor's Accept, with image checks, a placeholder policy, a daily cap and a kill switch.",
+    "type": "wordpress-plugin",
+    "license": "MIT",
+    "keywords": ["wordpress", "featured-image", "image-generation", "editorial"],
+    "homepage": "https://github.com/IndianOpinion/featured-from-prompt",
+    "authors": [
+        {
+            "name": "Indian Opinion",
+            "email": "hello@indianopinion.org"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/IndianOpinion/featured-from-prompt/issues",
+        "source": "https://github.com/IndianOpinion/featured-from-prompt"
+    },
+    "require": {
+        "php": ">=8.1"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5",
+        "phpstan/phpstan": "^2.1",
+        "squizlabs/php_codesniffer": "^3.10",
+        "php-stubs/wordpress-stubs": "^6.4",
+        "php-stubs/wp-cli-stubs": "^2.10"
+    },
+    "autoload": {
+        "psr-4": {
+            "IndianOpinion\\FeaturedFromPrompt\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "IndianOpinion\\FeaturedFromPrompt\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "test:integration": "phpunit --testsuite integration",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "lint": "phpcs",
+        "check": ["@lint", "@analyse", "@test"]
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.1.0"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
