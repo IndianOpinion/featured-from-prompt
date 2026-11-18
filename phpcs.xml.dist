@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<ruleset name="featured-from-prompt">
+    <description>PSR-12, with WordPress-style snake_case method names.</description>
+    <file>src</file>
+    <file>tests</file>
+    <file>featured-from-prompt.php</file>
+    <file>uninstall.php</file>
+    <file>examples</file>
+    <exclude-pattern>tests/stubs/*</exclude-pattern>
+    <arg name="extensions" value="php"/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+    <rule ref="PSR12">
+        <!-- WordPress hooks and APIs use snake_case; the plugin follows them. -->
+        <exclude name="PSR1.Methods.CamelCapsMethodName.NotCamelCaps"/>
+        <exclude name="Squiz.Classes.ValidClassName.NotCamelCaps"/>
+    </rule>
+    <!-- Long help strings and the default prompt template stay on one line. -->
+    <rule ref="Generic.Files.LineLength">
+        <properties>
+            <property name="lineLimit" value="360"/>
+            <property name="absoluteLineLimit" value="0"/>
+        </properties>
+    </rule>
+    <rule ref="PSR1.Files.SideEffects.FoundWithSymbols">
+        <exclude-pattern>tests/bootstrap.php</exclude-pattern>
+    </rule>
+</ruleset>

@@ -1,0 +1,6 @@
+.ffp-panel .ffp-prompt { width: 100%; }
+.ffp-panel .ffp-suggestion { border-top: 1px solid #dcdcde; margin-top: 8px; padding-top: 8px; }
+.ffp-panel .ffp-suggestion img { display: block; max-width: 100%; height: auto; }
+.ffp-panel .ffp-actions .button { margin-right: 6px; }
+.ffp-panel .ffp-note, .ffp-panel .ffp-caps, .ffp-panel .ffp-meta { color: #50575e; }
+.ffp-panel .ffp-label-text { display: block; font-weight: 600; margin-bottom: 4px; }
