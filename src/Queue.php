@@ -197,15 +197,21 @@ final class Queue
     }
 
     /**
-     * gen-queue job handler (case 81). The guards run inside Worker::run.
+     * gen-queue job handler (case 81). gen-queue passes its Job (payload in
+     * `$job->payload`) and a JobContext. The guards run inside Worker::run;
+     * retries go back to the own queue, so the job always ends ok.
      *
-     * @param array<string, mixed> $payload
+     * @param mixed $job
+     * @param mixed $context
      * @return array<string, mixed>
      */
-    public static function handle_job(array $payload): array
+    public static function handle_job($job, $context = null): array
     {
+        $payload = is_object($job) && isset($job->payload) ? $job->payload : $job;
+        $payload = is_array($payload) ? $payload : [];
         $id = isset($payload['request_id']) && is_string($payload['request_id']) ? $payload['request_id'] : '';
-        return Worker::run($id)->to_array();
+        $record = Worker::run($id)->to_array();
+        return ['request_id' => $id, 'reason' => (string) ($record['reason'] ?? '')];
     }
 
     public static function ensure_scheduled(): void

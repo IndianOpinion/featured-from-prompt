@@ -44,27 +44,33 @@ final class QueueRobustnessTest extends TestCase
     {
         add_filter('ffp_use_gen_queue', static fn () => true);
         $jobs = [];
-        add_filter('gen_queue_enqueue_job', function ($result, array $job) use (&$jobs) {
-            $jobs[] = $job;
-            return 'job-' . count($jobs);
-        }, 10, 2);
+        add_filter('gen_queue_enqueue_job', function ($result, $type, $payload, $args) use (&$jobs) {
+            $jobs[] = ['type' => $type, 'payload' => $payload, 'args' => $args];
+            return count($jobs);
+        }, 10, 4);
         $post = $this->post();
         $result = $this->queue($post);
         $this->assertTrue($result->queued);
         $this->assertSame(Integrations::JOB_TYPE, $jobs[0]['type']);
-        $this->assertSame('ffp:' . $post . ':' . $result->request_id, $jobs[0]['idempotency_key']);
+        $this->assertSame(1, preg_match('/^[a-z0-9][a-z0-9_.-]{0,63}$/', $jobs[0]['type']), 'a valid gen-queue type name');
+        $this->assertSame(['request_id' => $result->request_id, 'post_id' => $post], $jobs[0]['payload']);
+        $this->assertSame('ffp:' . $post . ':' . $result->request_id, $jobs[0]['args']['idempotency_key']);
         $row = $this->storage->get_request((string) $result->request_id);
         $this->assertSame('gen-queue', $row['runner']);
+        $this->assertSame('1', $row['record']['job_id']);
         $this->assertSame(0, WP::$spawned);
 
         Queue::run_batch();
         $this->assertSame('queued', $this->storage->get_request((string) $result->request_id)['state'], 'the own runner leaves gen-queue jobs alone');
 
+        // gen-queue calls the handler with its Job object and a context.
+        $job = (object) ['payload' => ['request_id' => $result->request_id, 'post_id' => $post]];
         $this->settings(['enabled' => false]);
-        $handled = Queue::handle_job(['request_id' => $result->request_id]);
+        $handled = Queue::handle_job($job, new \stdClass());
         $this->assertSame(Reason::DISABLED, $handled['reason'], 'guards run inside the handler');
+        $this->assertSame('own', $this->storage->get_request((string) $result->request_id)['runner'], 'a parked job goes back to the own queue, never orphaned');
         $this->settings(['enabled' => true]);
-        $handled = Queue::handle_job(['request_id' => $result->request_id]);
+        $handled = Queue::handle_job($job, new \stdClass());
         $this->assertSame(Reason::SUGGESTION_READY, $handled['reason']);
 
         remove_all_filters('gen_queue_enqueue_job');
@@ -73,8 +79,8 @@ final class QueueRobustnessTest extends TestCase
         $this->assertSame('own', $this->storage->get_request((string) $fallback->request_id)['runner']);
         $this->assertTrue($this->has_log('gen-queue did not take the job'));
 
-        $handlers = apply_filters('gen_queue_job_handlers', []);
-        $this->assertArrayHasKey(Integrations::JOB_TYPE, $handlers);
+        // The type is registered on gen_queue_register_types.
+        $this->assertNotFalse(has_filter('gen_queue_register_types'));
     }
 
     public function test_case_82_queue_age_limit_for_auto_only(): void

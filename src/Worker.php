@@ -181,30 +181,20 @@ final class Worker
 
         // 33: spend-meter, a second gate and never a bypass.
         $caps = $provider->capabilities();
-        $intent = [
-            'purpose' => 'featured_image',
-            'caller' => 'featured-from-prompt',
-            'provider' => $provider->id(),
-            'model' => (string) ($provider_settings['model'] ?? ''),
-            'est_units' => 1,
-            'post_id' => $post_id,
-            'request_id' => (string) $row['id'],
-        ];
+        $intent = Integrations::spend_intent($provider->id(), (string) ($provider_settings['model'] ?? ''), $post_id);
         $spend = Integrations::spend_check($intent);
         if ($spend['meter'] && !$spend['allowed']) {
             Caps::refund($post_id, $day);
             $row['record']['spend_reason'] = $spend['reason'];
             return self::finish($row, 'skipped', Reason::SPEND_DENIED);
         }
-        $settle = static function (bool $billed, ?ImageResult $result = null) use ($spend, $intent): void {
-            if (!$spend['meter']) {
+        // Exactly one record or release follows every allowed reservation.
+        $settle = static function (?string $status, float $units = 1.0, string $error = '') use ($spend, $intent): void {
+            if ($status === null) {
+                Integrations::spend_release($spend);
                 return;
             }
-            if ($billed) {
-                Integrations::spend_record($intent, $spend['decision'], $result !== null ? $result->units : 1.0, $result?->provider_cost);
-            } else {
-                Integrations::spend_release($intent, $spend['decision']);
-            }
+            Integrations::spend_record($intent, $spend, $status, $units, 0, $error);
         };
 
         // Claim the row. Another worker that got here first wins.
@@ -219,7 +209,7 @@ final class Worker
         ], 'queued');
         if (!$claimed) {
             Caps::refund($post_id, $day);
-            $settle(false);
+            $settle(null);
             $fresh = $storage->get_request((string) $row['id']);
             return new RequestRecord(Reason::LOCKED, $fresh ?? $row);
         }
@@ -267,43 +257,43 @@ final class Worker
         } catch (ConfigException $e) {
             // Thrown before any HTTP call: refund (case 32).
             Caps::refund($post_id, $day);
-            $settle(false);
+            $settle(null);
             $row['record']['error'] = Logger::short($e->getMessage(), 300);
             return self::finish($row, 'skipped', Reason::CONFIG_ERROR, 0, $start);
         } catch (AuthException $e) {
-            $settle(true);
+            $settle('error_unbilled', 0.0, Reason::AUTH_FAILED);
             Pauses::pause($provider->id(), Reason::AUTH_FAILED, 0);
             $row['record']['error'] = Logger::short($e->getMessage(), 300);
             return self::finish($row, 'failed', Reason::AUTH_FAILED, 0, $start);
         } catch (QuotaException $e) {
-            $settle(true);
+            $settle('error_unbilled', 0.0, Reason::QUOTA_EXHAUSTED);
             Pauses::pause($provider->id(), Reason::QUOTA_EXHAUSTED, $clock->now() + (int) $settings['quota_pause']);
             $row['record']['error'] = Logger::short($e->getMessage(), 300);
             return self::finish($row, 'failed', Reason::QUOTA_EXHAUSTED, 0, $start);
         } catch (RateLimitException $e) {
-            $settle(true);
+            $settle('error_unbilled', 0.0, Reason::RATE_LIMITED);
             $wait = $e->retryAfter();
             $wait = $wait === null || $wait <= 0 ? 300 : min(3600, $wait);
             return self::requeue($row, Reason::RATE_LIMITED, $clock->now() + $wait);
         } catch (PromptRefusedException $e) {
-            $settle(true);
+            $settle('error_unbilled', 0.0, Reason::PROMPT_REFUSED);
             $row['record']['provider_message'] = mb_substr(wp_strip_all_tags($e->providerMessage()), 0, 500);
             return self::finish($row, 'failed', Reason::PROMPT_REFUSED, 0, $start);
         } catch (TransientException $e) {
-            $settle(true);
+            $settle('error_billed', 1.0, $e->isTimeout() ? Reason::TIMEOUT : Reason::TRANSIENT);
             return self::retry_or_fail($row, $e->isTimeout() ? Reason::TIMEOUT : Reason::TRANSIENT, $e->getMessage(), (int) $settings['attempts'], $start);
         } catch (BadResponseException $e) {
-            $settle(true);
+            $settle('error_billed', 1.0, Reason::BAD_RESPONSE);
             return self::retry_or_fail($row, Reason::BAD_RESPONSE, $e->getMessage(), (int) $settings['attempts'], $start);
         } catch (\Throwable $e) {
             // Case 45: anything else is mapped to transient and logged.
-            $settle(true);
+            $settle('error_billed', 1.0, Reason::TRANSIENT);
             Plugin::logger()->notice('Adapter threw an unexpected ' . get_class($e) . ': ' . Logger::short($e->getMessage(), 200), [
                 'request_id' => $row['id'],
             ]);
             return self::retry_or_fail($row, Reason::TRANSIENT, $e->getMessage(), (int) $settings['attempts'], $start);
         }
-        $settle(true, $result);
+        $settle('ok', $result->units);
 
         $row['record'] = array_merge($row['record'], [
             'model' => $result->model,
@@ -417,6 +407,13 @@ final class Worker
         if (!Caps::reserve_day($day)) {
             return $fail(Reason::CAP_DAY);
         }
+        // The provider test is a paid call too: spend-meter is asked first.
+        $intent = Integrations::spend_intent($provider->id(), (string) ($settings['model'] ?? ''));
+        $spend = Integrations::spend_check($intent);
+        if ($spend['meter'] && !$spend['allowed']) {
+            Plugin::storage()->refund('day', $day);
+            return $fail(Reason::SPEND_DENIED, Reason::describe(Reason::SPEND_DENIED) . ' (' . $spend['reason'] . ')');
+        }
         $all = Settings::all();
         [$aw, $ah] = Settings::aspect_parts();
         $size = SizeChooser::choose($provider->capabilities(), $aw, $ah, (int) $all['target_width'], (int) $all['target_height'], (int) $all['min_width'], (int) $all['min_height']);
@@ -432,7 +429,19 @@ final class Worker
             0
         );
         try {
-            $result = $provider->generate($request, $settings);
+            try {
+                $result = $provider->generate($request, $settings);
+            } catch (ConfigException $e) {
+                Integrations::spend_release($spend);
+                throw $e;
+            } catch (AuthException | QuotaException | RateLimitException | PromptRefusedException $e) {
+                Integrations::spend_record($intent, $spend, 'error_unbilled', 0.0, 0, 'provider_test');
+                throw $e;
+            } catch (\Throwable $e) {
+                Integrations::spend_record($intent, $spend, 'error_billed', 1.0, 0, 'provider_test');
+                throw $e;
+            }
+            Integrations::spend_record($intent, $spend, 'ok', $result->units);
             $bytes = $result->bytes;
             if (($bytes === null || $bytes === '') && $result->url !== null && $result->url !== '') {
                 $bytes = Downloader::fetch($result->url, (int) $all['max_mb'] * 1048576, (int) $all['timeout'], $provider->capabilities()->local_hosts);
@@ -528,8 +537,11 @@ final class Worker
      */
     private static function park(array $row, string $reason, int $next_run): RequestRecord
     {
-        $fields = ['reason' => $reason, 'next_run' => $next_run, 'updated_at' => Plugin::clock()->now()];
+        // A parked row is run by the own queue from now on, so a gen-queue
+        // job that already ended does not leave it orphaned.
+        $fields = ['reason' => $reason, 'next_run' => $next_run, 'updated_at' => Plugin::clock()->now(), 'runner' => 'own'];
         Plugin::storage()->update_request((string) $row['id'], $fields, 'queued');
+        Queue::ensure_scheduled();
         Queue::note((int) $row['post_id'], (string) $row['trigger_type'], 'waiting', $reason, (string) $row['id']);
         return new RequestRecord($reason, array_merge($row, $fields));
     }

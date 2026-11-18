@@ -161,4 +161,30 @@ final class PromptTest extends TestCase
         $this->assertStringContainsString('Rain returns', $prompt);
         $this->assertTrue($this->has_log('non-string'));
     }
+
+    public function test_prompt_library_renders_when_it_holds_a_live_template(): void
+    {
+        $post = $this->post(['post_title' => 'Monsoon arrives early']);
+        $seen = [];
+        add_filter('promptlib_render', function ($previous, $slug, $values, $version, $options) use (&$seen) {
+            $seen = [$slug, $values, $version, $options];
+            return ['system' => '', 'user' => 'Library prompt for ' . $values['title'] . '.'];
+        }, 10, 5);
+        $preview = \IndianOpinion\FeaturedFromPrompt\PromptBuilder::preview($post);
+        $this->assertSame('Library prompt for Monsoon arrives early.', $preview->prompt);
+        $this->assertSame('featured-from-prompt', $seen[0]);
+        $this->assertSame('live', $seen[2]);
+        $this->assertSame('featured-from-prompt', $seen[3]['consumer']);
+        $this->assertArrayHasKey('summary', $seen[1]);
+
+        // Not found: the own template, silently. Other errors: logged, own template.
+        remove_all_filters('promptlib_render');
+        add_filter('promptlib_render', static fn () => new \WP_Error('promptlib_not_found', 'none'));
+        $this->assertStringContainsString('Monsoon arrives early', \IndianOpinion\FeaturedFromPrompt\PromptBuilder::preview($post)->prompt);
+        $this->assertFalse($this->has_log('prompt-library could not render'));
+        remove_all_filters('promptlib_render');
+        add_filter('promptlib_render', static fn () => new \WP_Error('promptlib_missing_variable', 'x'));
+        $this->assertStringContainsString('editorial illustration', \IndianOpinion\FeaturedFromPrompt\PromptBuilder::preview($post)->prompt);
+        $this->assertTrue($this->has_log('prompt-library could not render'));
+    }
 }

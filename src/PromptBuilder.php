@@ -28,8 +28,11 @@ final class PromptBuilder
         if ($is_override) {
             $prompt = self::clean((string) $override);
         } else {
-            $template = self::template($post_id, (string) $settings['template']);
-            $prompt = $variables['title'] === '' ? '' : self::clean(self::render($template, $variables));
+            $prompt = '';
+            if ($variables['title'] !== '') {
+                $library = Integrations::prompt_library_render($post_id, $variables);
+                $prompt = self::clean($library ?? self::render(self::template($post_id, (string) $settings['template']), $variables));
+            }
         }
 
         $truncated = false;
@@ -83,18 +86,9 @@ final class PromptBuilder
         return $vars;
     }
 
-    /** Resolve the template: prompt-library first when present, then the filter. */
+    /** The own template after the ffp_prompt_template filter. */
     private static function template(int $post_id, string $template): string
     {
-        if (Integrations::prompt_library_active()) {
-            $library = apply_filters('prompt_library_get_template', null, 'featured-from-prompt/featured-image', [
-                'post_id' => $post_id,
-                'default' => $template,
-            ]);
-            if (is_string($library) && trim($library) !== '') {
-                $template = $library;
-            }
-        }
         $filtered = apply_filters('ffp_prompt_template', $template, $post_id);
         return is_string($filtered) && $filtered !== '' ? $filtered : $template;
     }

@@ -165,12 +165,14 @@ final class GuardsTest extends TestCase
 
     public function test_case_33_spend_meter_is_a_second_gate(): void
     {
-        $calls = ['record' => 0, 'release' => 0, 'intent' => null];
-        add_action('spend_meter_record', function () use (&$calls): void {
+        $calls = ['record' => 0, 'release' => 0, 'intent' => null, 'call' => null, 'released' => null];
+        add_action('spend_meter_record', function ($call) use (&$calls): void {
             $calls['record']++;
+            $calls['call'] = $call;
         });
-        add_action('spend_meter_release', function () use (&$calls): void {
+        add_action('spend_meter_release', function ($reservation_id) use (&$calls): void {
             $calls['release']++;
+            $calls['released'] = $reservation_id;
         });
 
         // No meter: own caps decide.
@@ -191,10 +193,13 @@ final class GuardsTest extends TestCase
         $this->assertSame('featured-from-prompt', $calls['intent']['caller']);
         $this->assertSame(1, $calls['intent']['est_units']);
         $this->assertSame('fake', $calls['intent']['provider']);
+        $this->assertNotSame('', $calls['intent']['model'], 'spend-meter requires a model');
+        $this->assertSame('fake', \IndianOpinion\FeaturedFromPrompt\Integrations::spend_intent('fake', '')['model'], 'no model setting sends the provider id');
+        $this->assertSame(1, preg_match('/^[a-z0-9][a-z0-9_.-]{0,63}$/', $calls['intent']['purpose']));
 
         // Allow, but the own cap is reached: cap_day, and the meter is never asked.
         remove_all_filters('spend_meter_pre_spend');
-        add_filter('spend_meter_pre_spend', static fn () => ['allowed' => true]);
+        add_filter('spend_meter_pre_spend', static fn () => ['allowed' => true, 'reason' => 'ok', 'reservation_id' => 'res-1']);
         $this->settings(['day_cap' => $used]);
         $this->assertSame(Reason::CAP_DAY, $this->generate($this->post())->reason);
 
@@ -202,10 +207,22 @@ final class GuardsTest extends TestCase
         $this->settings(['day_cap' => 100]);
         $this->generate($this->post());
         $this->assertSame(1, $calls['record']);
+        $this->assertSame('res-1', $calls['call']['reservation_id']);
+        $this->assertSame('ok', $calls['call']['status']);
+        $this->assertSame('featured_image', $calls['call']['purpose']);
+        $this->assertSame('featured-from-prompt', $calls['call']['caller']);
+        $this->assertSame(0, $calls['release']);
         $this->provider->push(new ConfigException('x'));
         $this->generate($this->post());
         $this->assertSame(1, $calls['release']);
+        $this->assertSame('res-1', $calls['released']);
         $this->assertSame(1, $calls['record']);
+        // A sent call that failed is still recorded, as billed or not.
+        $this->provider->push(TransientException::timeout());
+        $this->generate($this->post());
+        $this->assertSame(2, $calls['record']);
+        $this->assertSame('error_billed', $calls['call']['status']);
+        $this->assertSame(1, $calls['release']);
 
         // A non-true "allowed" is a deny.
         remove_all_filters('spend_meter_pre_spend');

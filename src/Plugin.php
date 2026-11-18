@@ -132,12 +132,14 @@ final class Plugin
         Privacy::register();
         SiteHealth::register();
 
+        add_filter('update_post_metadata', [Suggestions::class, 'guard_thumbnail_write'], 10, 4);
+        add_filter('add_post_metadata', [Suggestions::class, 'guard_thumbnail_write'], 10, 4);
         add_action('updated_post_meta', [self::class, 'on_meta'], 10, 4);
         add_action('added_post_meta', [self::class, 'on_meta'], 10, 4);
         add_action('delete_attachment', [Suggestions::class, 'on_delete_attachment']);
         add_filter('wp_get_attachment_url', [self::class, 'filter_attachment_url'], 10, 2);
 
-        add_filter('gen_queue_job_handlers', [self::class, 'gen_queue_handlers']);
+        add_action('gen_queue_register_types', [Integrations::class, 'register_gen_queue_type']);
 
         if (is_admin()) {
             Admin\SettingsPage::register();
@@ -177,16 +179,5 @@ final class Plugin
     {
         $schedules[Queue::CRON_SCHEDULE] = ['interval' => 60, 'display' => 'Every minute (featured-from-prompt)'];
         return $schedules;
-    }
-
-    /**
-     * @param mixed $handlers
-     * @return array<string, callable>
-     */
-    public static function gen_queue_handlers($handlers): array
-    {
-        $handlers = is_array($handlers) ? $handlers : [];
-        $handlers[Integrations::JOB_TYPE] = [Queue::class, 'handle_job'];
-        return $handlers;
     }
 }
