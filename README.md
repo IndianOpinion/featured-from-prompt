@@ -246,3 +246,7 @@ Writing an adapter for another API: implement `Provider\ImageProvider` and regis
 ## Licence
 
 MIT. Copyright (c) 2026 Indian Opinion. See [LICENSE](LICENSE).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
