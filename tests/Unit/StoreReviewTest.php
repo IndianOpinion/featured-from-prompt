@@ -198,6 +198,77 @@ final class StoreReviewTest extends TestCase
         $this->assertFalse(Paths::is_private((string) get_attached_file($b)));
     }
 
+    public function test_only_a_person_can_pick_a_pending_suggestion_outside_accept(): void
+    {
+        $post = $this->post();
+        $other = $this->post();
+        $id = $this->suggestion($post);
+
+        // Another post's thumbnail: refused, nothing changes.
+        set_post_thumbnail($other, $id);
+        $this->assertSame('', get_post_meta($other, '_thumbnail_id', true));
+
+        // Cron or code with no user: refused.
+        WP::$current_user = 0;
+        set_post_thumbnail($post, $id);
+        add_post_meta($post, '_thumbnail_id', $id);
+        $this->assertSame('', get_post_meta($post, '_thumbnail_id', true));
+
+        // A user who cannot upload: refused.
+        WP::add_user(12, ['edit_post']);
+        WP::$current_user = 12;
+        set_post_thumbnail($post, $id);
+        $this->assertSame('', get_post_meta($post, '_thumbnail_id', true));
+        $this->assertSame('pending', Suggestions::state($id));
+        $this->assertTrue(Paths::is_private((string) get_post_meta($id, '_wp_attached_file', true)));
+        $this->assertSame(0, $this->fired('ffp_accepted'));
+
+        // The editor's own pick still counts as Accept.
+        WP::$current_user = self::EDITOR;
+        set_post_thumbnail($post, $id);
+        $this->assertSame('accepted', Suggestions::state($id));
+    }
+
+    public function test_private_directory_fails_closed(): void
+    {
+        // Inside uploads: refused, nothing stored, request ends store_failed.
+        add_filter('ffp_private_dir', static fn () => WP::$root . '/uploads/ffp-private');
+        $record = $this->generate($this->post());
+        $this->assertSame(Reason::STORE_FAILED, $record->reason);
+        $this->assertDirectoryDoesNotExist(WP::$root . '/uploads/ffp-private');
+        $this->assertSame([], get_posts(['post_type' => 'attachment', 'fields' => 'ids']));
+        remove_all_filters('ffp_private_dir');
+
+        // A path with "..": refused.
+        add_filter('ffp_private_dir', static fn () => WP_CONTENT_DIR . '/ffp-private/../elsewhere');
+        $this->assertSame(Reason::STORE_FAILED, $this->generate($this->post())->reason);
+    }
+
+    public function test_only_plugin_named_files_count_as_private(): void
+    {
+        $dir = Paths::private_dir();
+        $this->assertTrue(Paths::is_private($dir . '/ffp-0123456789abcdef.png'));
+        $this->assertFalse(Paths::is_private($dir . '/../../wp-config.php'));
+        $this->assertFalse(Paths::is_private($dir . '/sub/ffp-0123456789abcdef.png'));
+        $this->assertFalse(Paths::is_private($dir . '/ffp-0123456789abcdef.php'));
+        $this->assertFalse(Paths::is_private($dir . '/ffp-0123456789abcdef.png.php'));
+        $this->assertFalse(Paths::is_private($dir . '/.htaccess'));
+    }
+
+    public function test_accept_refuses_a_pending_file_whose_bytes_do_not_match(): void
+    {
+        $post = $this->post();
+        $id = $this->suggestion($post);
+        $file = (string) get_post_meta($id, '_wp_attached_file', true);
+        file_put_contents($file, '<?php echo "hi"; ?>' . str_repeat(' ', 2048));
+        $result = Suggestions::accept($id, self::EDITOR);
+        $this->assertFalse($result->ok);
+        $this->assertSame(Reason::STORE_FAILED, $result->reason);
+        $this->assertSame('pending', Suggestions::state($id));
+        $this->assertTrue(Paths::is_private((string) get_post_meta($id, '_wp_attached_file', true)));
+        $this->assertSame('', get_post_meta($post, '_thumbnail_id', true));
+    }
+
     public function test_post_lock_warns_then_proceeds_on_confirmation(): void
     {
         $post = $this->post();

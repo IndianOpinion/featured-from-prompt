@@ -27,10 +27,22 @@ final class Paths
         return is_string($dir) && $dir !== '' ? rtrim($dir, '/\\') : $base;
     }
 
-    /** Create the directory with deny files for Apache and IIS. */
+    /**
+     * Create the directory with deny files for Apache and IIS. Fails closed:
+     * a directory inside the uploads tree, or one whose deny files cannot be
+     * written, is refused and nothing is stored.
+     */
     public static function ensure_private_dir(): string
     {
         $dir = self::private_dir();
+        if (str_contains(wp_normalize_path($dir), '/../') || str_ends_with(wp_normalize_path($dir), '/..')) {
+            throw new \RuntimeException('The private directory path must not contain "..".');
+        }
+        $uploads = wp_upload_dir(null, false);
+        $base = is_array($uploads) && isset($uploads['basedir']) && is_string($uploads['basedir']) ? $uploads['basedir'] : '';
+        if ($base !== '' && self::inside(rtrim(wp_normalize_path($dir), '/') . '/', rtrim(wp_normalize_path($base), '/') . '/')) {
+            throw new \RuntimeException('The private directory must be outside the uploads directory.');
+        }
         if (!is_dir($dir) && !wp_mkdir_p($dir)) {
             throw new \RuntimeException('Cannot create the private directory.');
         }
@@ -41,20 +53,37 @@ final class Paths
         ];
         foreach ($files as $name => $body) {
             $path = $dir . '/' . $name;
-            if (!file_exists($path)) {
-                file_put_contents($path, $body);
+            if (!file_exists($path) && file_put_contents($path, $body) !== strlen($body)) {
+                throw new \RuntimeException('Cannot write ' . $name . ' in the private directory.');
             }
         }
         return $dir;
     }
 
+    /**
+     * True for a file directly in the private directory with a name this
+     * plugin generates. Anything else (a "..", a sub-directory, a foreign
+     * name) is not treated as private, so it is never streamed or deleted.
+     */
     public static function is_private(string $path): bool
     {
         if ($path === '') {
             return false;
         }
-        $dir = self::private_dir() . '/';
-        return strncmp(wp_normalize_path($path), wp_normalize_path($dir), strlen(wp_normalize_path($dir))) === 0;
+        $path = wp_normalize_path($path);
+        $dir = rtrim(wp_normalize_path(self::private_dir()), '/');
+        return dirname($path) === $dir && self::valid_name(basename($path));
+    }
+
+    /** The shape of every name random_name() makes. */
+    public static function valid_name(string $name): bool
+    {
+        return preg_match('/^ffp-[0-9a-f]{16}\.(png|jpg|webp)$/D', $name) === 1;
+    }
+
+    private static function inside(string $path, string $dir): bool
+    {
+        return strncmp($path, $dir, strlen($dir)) === 0;
     }
 
     /** A random, non-guessable file name (case 56). */
@@ -66,8 +95,20 @@ final class Paths
     /**
      * Move a pending file into the uploads tree. Returns the new path.
      */
-    public static function publish(string $private_path, int $time): string
+    public static function publish(string $private_path, int $time, string $mime = ''): string
     {
+        $name = basename($private_path);
+        if (!self::is_private($private_path) || !is_file($private_path) || is_link($private_path)) {
+            throw new \RuntimeException('Not a pending file of this plugin.');
+        }
+        // The bytes, not the name, decide: re-sniff before anything enters uploads.
+        $head = file_get_contents($private_path, false, null, 0, 16);
+        $kind = is_string($head) ? ImageChecker::sniff($head) : null;
+        $ext = (string) pathinfo($name, PATHINFO_EXTENSION);
+        $expected = ['png' => 'image/png', 'jpg' => 'image/jpeg', 'webp' => 'image/webp'];
+        if ($kind === null || $kind !== $ext || ($mime !== '' && $expected[$kind] !== $mime)) {
+            throw new \RuntimeException('The pending file is not the image type it claims to be.');
+        }
         $uploads = wp_upload_dir(gmdate('Y/m', $time));
         if (!empty($uploads['error'])) {
             throw new \RuntimeException('Uploads directory is not writable.');
@@ -76,7 +117,7 @@ final class Paths
         if (!is_dir($dir) && !wp_mkdir_p($dir)) {
             throw new \RuntimeException('Cannot create the uploads directory.');
         }
-        $name = wp_unique_filename($dir, basename($private_path));
+        $name = wp_unique_filename($dir, $name);
         $target = $dir . '/' . $name;
         if (!rename($private_path, $target)) {
             if (!copy($private_path, $target)) {

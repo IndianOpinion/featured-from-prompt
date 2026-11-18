@@ -70,6 +70,8 @@ Pending images live in `wp-content/ffp-private/` (or the path in the `FFP_PRIVAT
 location ^~ /wp-content/ffp-private/ { deny all; }
 ```
 
+The plugin fails closed: it refuses to store anything when the directory would sit inside the uploads tree, when its path contains `..`, or when the deny files cannot be written. On Accept the file is moved into uploads only when its name is one the plugin made and its bytes still sniff as the image type on record.
+
 ### Cron
 
 Requests run from WP-Cron every minute while work is queued. With `DISABLE_WP_CRON` set, run cron yourself:
@@ -186,11 +188,19 @@ trigger (button, REST, save, publish, ffp_request, backfill, CLI)
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the modules, the data and every design decision.
 
+## Companion plugins
+
+All three are optional and reached only through their public hooks.
+
+- **spend-meter** (contract `SPEND_METER_API` 1). Before each call the worker applies `spend_meter_pre_spend` with an intent: purpose `featured_image`, caller `featured-from-prompt`, the provider id, the model (the provider id when no model is set) and `est_units` 1. `null` means no meter. Anything but `allowed: true` ends the request `spend_denied` and refunds the plugin's own reservation. A sent call is reported with one `spend_meter_record` call array (`ok`, `error_billed` or `error_unbilled`); a call that was never sent releases the reservation with `spend_meter_release`. The provider test on the settings screen goes through the same gate.
+- **gen-queue**. When `GEN_QUEUE_VERSION` is defined, the plugin registers the job type `featured_from_prompt.generate` on `gen_queue_register_types` and enqueues through `gen_queue_enqueue_job` with the idempotency key `ffp:<post_id>:<request_id>`. The handler runs every guard. Retries and waits go back to the own queue, so a gen-queue job runs once. gen-queue's own daily cap applies too: with no cap set there, nothing runs.
+- **prompt-library**. When it holds a live template with the slug `featured-from-prompt` (filter `ffp_prompt_library_slug`), the prompt is rendered through `promptlib_render` with the variables above as values (`title`, `summary`, `category`, `tags`, `post_type`, `style`, `site_language`). Otherwise, or on any render error, the plugin's own template is used.
+
 ## Hooks, PHP API, REST and WP-CLI
 
 PHP API (namespace `IndianOpinion\FeaturedFromPrompt`, with global `ffp_*` wrappers): `request()`, `run_request()`, `preview_prompt()`, `accept()`, `reject()`, `status()`, `is_generated()`, `is_placeholder()`, `register_provider()`.
 
-Filters: `ffp_enabled`, `ffp_should_process`, `ffp_prompt_variables`, `ffp_prompt_template`, `ffp_primary_term`, `ffp_prompt`, `ffp_image_rules`, `ffp_http_args`, `ffp_attachment_data`, `ffp_placeholder_id`, `ffp_is_placeholder`, `ffp_label_html`, `ffp_label_context`, `ffp_keep_attachment`, `ffp_capability_generate`, `ffp_capability_settings`, `ffp_day_cap`, `ffp_post_cap` (lower only), `ffp_private_dir`, `ffp_use_gen_queue`.
+Filters: `ffp_enabled`, `ffp_should_process`, `ffp_prompt_variables`, `ffp_prompt_template`, `ffp_primary_term`, `ffp_prompt`, `ffp_image_rules`, `ffp_http_args`, `ffp_attachment_data`, `ffp_placeholder_id`, `ffp_is_placeholder`, `ffp_label_html`, `ffp_label_context`, `ffp_keep_attachment`, `ffp_capability_generate`, `ffp_capability_settings`, `ffp_day_cap`, `ffp_post_cap` (lower only), `ffp_private_dir`, `ffp_use_gen_queue`, `ffp_prompt_library_slug`.
 
 Actions: `ffp_register_providers`, `ffp_request`, `ffp_request_queued`, `ffp_request_finished`, `ffp_suggestion_ready`, `ffp_accepted`, `ffp_rejected`, `ffp_placeholder_set`, `ffp_provider_paused`, `ffp_cap_reached`, `ffp_log`. `ffp_accepted` is the signal for share-card renderers and page caches to refresh anything built from the old picture.
 
@@ -205,7 +215,7 @@ Writing an adapter for another API: implement `Provider\ImageProvider` and regis
 - Prompts, the negative prompt and the size are sent to the third-party image API you configure, and are subject to its terms and retention. Post content is reduced to the summary words, with URLs and e-mail addresses removed. Private and password-protected posts are excluded by default.
 - The default template asks for no identifiable person. Changing that carries legal and ethical risk; think before you do.
 - Secrets are read from constants first, otherwise stored in non-autoloaded options, never shown again, never logged, never in REST answers or records.
-- Result downloads use safe HTTP only (no private, loopback or link-local addresses), HTTPS, a byte limit and at most 3 redirects. The type is sniffed from the bytes and the pixel count is checked before any image editor touches the file.
+- Result downloads use HTTPS, a byte limit and at most 3 redirects. The plugin follows each redirect itself and checks every hop: no private, loopback, link-local or reserved address, written literally or reached through DNS. The same check applies to the job URL of a submit-then-poll API and to the endpoint (unless `FFP_ALLOW_LOCAL_ENDPOINT` is true). Submit and polls together stay inside the request timeout. The type is sniffed from the bytes and the pixel count is checked before any image editor touches the file.
 - Pending files have random names and no public URL; previews go through an authenticated REST route. Once accepted, a file is an ordinary upload and public by URL, like any other.
 - The plugin stores the requesting and reviewing user IDs and plugs into the WordPress personal data exporter and eraser.
 

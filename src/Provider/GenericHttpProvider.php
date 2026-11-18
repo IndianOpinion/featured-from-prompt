@@ -15,6 +15,9 @@ final class GenericHttpProvider implements ImageProvider
 {
     public const ID = 'generic-http';
 
+    /** 50 MB of image as base64 plus room for the JSON around it. */
+    public const MAX_RESPONSE_BYTES = 72 * 1048576;
+
     public const DEFAULT_BODY = '{"prompt": "{prompt}", "negative_prompt": "{negative_prompt}", "width": {width}, "height": {height}, "aspect_ratio": "{aspect_ratio}", "output_format": "{format}", "n": 1}';
 
     public function id(): string
@@ -100,7 +103,11 @@ final class GenericHttpProvider implements ImageProvider
     public function generate(ImageRequest $request, array $settings): ImageResult
     {
         $endpoint = (string) ($settings['endpoint'] ?? '');
+        $started = self::$clock !== null ? (self::$clock)() : time();
         $error = $this->endpoint_error($endpoint);
+        if ($error === null && Constants::get('FFP_ALLOW_LOCAL_ENDPOINT') !== true && Downloader::resolves_private($this->endpoint_host($endpoint))) {
+            $error = 'Endpoint URL resolves to a private address. Define FFP_ALLOW_LOCAL_ENDPOINT to allow it.';
+        }
         if ($error !== null) {
             throw new ConfigException($error);
         }
@@ -138,6 +145,8 @@ final class GenericHttpProvider implements ImageProvider
             'body' => $body,
             'timeout' => $request->timeout,
             'redirection' => 0,
+            // Base64 of the largest image the checks allow, plus the JSON around it.
+            'limit_response_size' => self::MAX_RESPONSE_BYTES,
         ];
         $filtered = apply_filters('ffp_http_args', $args, $endpoint, 'generate');
         if (is_array($filtered)) {
@@ -185,7 +194,7 @@ final class GenericHttpProvider implements ImageProvider
         }
         $poll_path = trim((string) ($settings['poll_url_path'] ?? ''));
         if ($poll_path !== '') {
-            [$json, $response] = $this->poll($json, $poll_path, $endpoint, $headers, $request->timeout, $settings, $secret);
+            [$json, $response] = $this->poll($json, $poll_path, $endpoint, $headers, $started + $request->timeout, $settings, $secret);
         }
         $value = self::path($json, (string) ($settings['image_path'] ?? ''));
         $revised = self::path($json, (string) ($settings['revised_prompt_path'] ?? ''));
@@ -242,7 +251,7 @@ final class GenericHttpProvider implements ImageProvider
      * @param array<string, string> $settings
      * @return array{0: array<mixed>, 1: array<mixed>}
      */
-    private function poll(array $submitted, string $poll_path, string $endpoint, array $headers, int $timeout, array $settings, string $secret): array
+    private function poll(array $submitted, string $poll_path, string $endpoint, array $headers, int $deadline, array $settings, string $secret): array
     {
         $url = self::path($submitted, $poll_path);
         if (!is_string($url) || $url === '') {
@@ -253,6 +262,13 @@ final class GenericHttpProvider implements ImageProvider
             throw new BadResponseException('The job URL must use HTTPS.');
         }
         $local = $this->capabilities_from($settings)->local_hosts;
+        try {
+            // Same rules as a download: HTTPS and never a private address
+            // unless it is the declared local endpoint host.
+            Downloader::check_url($url, $local);
+        } catch (\IndianOpinion\FeaturedFromPrompt\CheckFailed $e) {
+            throw new BadResponseException('The job URL is not allowed: ' . $e->getMessage());
+        }
         $same_host = strtolower((string) $parts['host']) === $this->endpoint_host($endpoint);
         if (!$same_host) {
             unset($headers[trim((string) ($settings['auth_header'] ?? 'Authorization'))]);
@@ -265,15 +281,17 @@ final class GenericHttpProvider implements ImageProvider
         $sleep = self::$sleeper ?? static function (int $seconds): void {
             sleep($seconds);
         };
-        $deadline = $now() + $timeout;
         $marker = trim((string) ($settings['refusal_marker'] ?? ''));
 
         while (true) {
             if ($now() >= $deadline) {
                 throw TransientException::timeout('The job did not finish within the timeout.');
             }
-            $sleep($interval);
-            $args = ['method' => 'GET', 'headers' => $headers, 'timeout' => max(5, min(30, $deadline - $now())), 'redirection' => 0];
+            $sleep(max(1, min($interval, $deadline - $now())));
+            if ($now() >= $deadline) {
+                throw TransientException::timeout('The job did not finish within the timeout.');
+            }
+            $args = ['method' => 'GET', 'headers' => $headers, 'timeout' => max(1, min(30, $deadline - $now())), 'redirection' => 0, 'limit_response_size' => self::MAX_RESPONSE_BYTES];
             $filtered = apply_filters('ffp_http_args', $args, $url, 'poll');
             $args = is_array($filtered) ? $filtered : $args;
             $is_local = in_array(strtolower((string) $parts['host']), $local, true);

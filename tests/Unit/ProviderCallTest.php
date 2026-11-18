@@ -79,22 +79,63 @@ final class ProviderCallTest extends TestCase
     public function test_case_38_unsafe_downloads_are_refused_and_counted(): void
     {
         $this->settings(['attempts' => 1]);
-        $redirects = 0;
-        WP::$http = static function (string $url, array $args) use (&$redirects): array|\WP_Error {
-            // The server redirects four times; WordPress stops at the limit.
-            if ($args['redirection'] < 4) {
-                return new \WP_Error('http_request_failed', 'Too many redirects.');
+        \IndianOpinion\FeaturedFromPrompt\Downloader::set_resolver(
+            static fn (string $host): array => $host === 'rebind.example.com' ? ['169.254.169.254'] : ['93.184.216.34']
+        );
+        WP::$http = static function (string $url, array $args): array|\WP_Error {
+            // Every hop is a redirect: hop N goes to hop N + 1.
+            if (preg_match('#/hop(\d+)\.png$#', $url, $m) === 1) {
+                return ['response' => ['code' => 302], 'headers' => ['location' => 'https://images.example.com/hop' . ((int) $m[1] + 1) . '.png'], 'body' => ''];
+            }
+            if (str_ends_with($url, '/to-metadata.png')) {
+                return ['response' => ['code' => 301], 'headers' => ['location' => 'http://169.254.169.254/latest/meta-data/'], 'body' => ''];
+            }
+            if (str_ends_with($url, '/to-rebind.png')) {
+                return ['response' => ['code' => 307], 'headers' => ['location' => 'https://rebind.example.com/a.png'], 'body' => ''];
             }
             return ['response' => ['code' => 200], 'body' => Img::png(1600, 900)];
         };
-        foreach (['https://10.1.2.3/a.png', 'http://images.example.com/a.png', 'https://images.example.com/redirecting.png', 'https://localhost/a.png'] as $i => $url) {
+        $urls = [
+            'https://10.1.2.3/a.png',
+            'http://images.example.com/a.png',
+            'https://localhost/a.png',
+            'https://169.254.169.254/a.png',
+            'https://[fd00::1]/a.png',
+            'https://2130706433/a.png',
+            'https://rebind.example.com/a.png',
+            'https://images.example.com/hop1.png',
+            'https://images.example.com/to-metadata.png',
+            'https://images.example.com/to-rebind.png',
+        ];
+        foreach ($urls as $i => $url) {
             $this->provider->push(new ImageResult(null, $url));
             $record = $this->generate($this->post());
             $this->assertSame(Reason::DOWNLOAD_FAILED, $record->reason, $url);
             $this->assertSame($i + 1, $this->day_count());
         }
-        $this->assertCount(1, WP::$http_calls, 'only the redirecting URL reached the HTTP layer');
-        $this->assertSame(3, WP::$http_calls[0]['args']['redirection']);
+        $reached = array_map(static fn (array $call): string => $call['url'], WP::$http_calls);
+        $this->assertSame([
+            'https://images.example.com/hop1.png',
+            'https://images.example.com/hop2.png',
+            'https://images.example.com/hop3.png',
+            'https://images.example.com/hop4.png',
+            'https://images.example.com/to-metadata.png',
+            'https://images.example.com/to-rebind.png',
+        ], $reached, 'four redirects stop at the limit; unsafe hops are never requested');
+        foreach (WP::$http_calls as $call) {
+            $this->assertSame(0, $call['args']['redirection'], 'redirects are followed by the plugin, hop by hop');
+        }
+
+        // Three redirects are allowed.
+        WP::$http_calls = [];
+        $this->provider->push(new ImageResult(null, 'https://images.example.com/hop2.png'));
+        WP::$http = static function (string $url, array $args): array|\WP_Error {
+            if (preg_match('#/hop([2-4])\.png$#', $url, $m) === 1) {
+                return ['response' => ['code' => 302], 'headers' => ['location' => 'https://images.example.com/hop' . ((int) $m[1] + 1) . '.png'], 'body' => ''];
+            }
+            return ['response' => ['code' => 200], 'body' => Img::png(1600, 900)];
+        };
+        $this->assertSame(Reason::SUGGESTION_READY, $this->generate($this->post())->reason);
     }
 
     public function test_case_39_account_errors_pause_the_provider(): void

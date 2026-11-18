@@ -242,6 +242,19 @@ function update_post_meta(int $id, string $key, mixed $value, mixed $prev = ''):
     do_action($exists ? 'updated_post_meta' : 'added_post_meta', 1, $id, $key, $value);
     return $exists ? true : 1;
 }
+function add_post_meta(int $id, string $key, mixed $value, bool $unique = false): int|false
+{
+    $check = apply_filters('add_post_metadata', null, $id, $key, $value, $unique);
+    if ($check !== null) {
+        return $check === false ? false : (int) $check;
+    }
+    if ($unique && array_key_exists($key, WP::$meta[$id] ?? [])) {
+        return false;
+    }
+    WP::$meta[$id][$key] = $value;
+    do_action('added_post_meta', 1, $id, $key, $value);
+    return 1;
+}
 function delete_post_meta(int $id, string $key, mixed $value = ''): bool
 {
     unset(WP::$meta[$id][$key]);
@@ -552,7 +565,7 @@ function wp_tempnam(string $name = ''): string
     return $file;
 }
 /** @return array<string, mixed> */
-function wp_upload_dir(?string $time = null): array
+function wp_upload_dir(?string $time = null, bool $create_dir = true): array
 {
     $base = WP::$root . '/uploads';
     $sub = $time !== null ? '/' . $time : '/2026/11';

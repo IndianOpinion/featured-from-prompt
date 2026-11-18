@@ -251,6 +251,58 @@ final class GenericHttpProviderTest extends TestCase
         (new GenericHttpProvider())->generate($this->request(), $config);
     }
 
+    public function test_poll_urls_are_checked_and_the_whole_call_is_bounded(): void
+    {
+        $now = 1000;
+        GenericHttpProvider::set_poll_hooks(function (int $s) use (&$now): void {
+            $now += $s;
+        }, function () use (&$now): int {
+            return $now;
+        });
+        $config = $this->config(['poll_url_path' => 'urls.get', 'image_kind' => 'url', 'image_path' => 'output.url', 'poll_interval' => '5']);
+        \IndianOpinion\FeaturedFromPrompt\Downloader::set_resolver(
+            static fn (string $host): array => $host === 'jobs.rebind.example.net' ? ['10.0.0.7'] : ['93.184.216.34']
+        );
+        foreach (['https://169.254.169.254/latest/meta-data/', 'https://[::1]/j', 'https://jobs.rebind.example.net/j', 'https://user:pw@jobs.example.net/j'] as $job_url) {
+            WP::$http_calls = [];
+            WP::$http = static fn (string $url, array $args): array => ['response' => ['code' => 201], 'body' => (string) wp_json_encode(['urls' => ['get' => $job_url]])];
+            try {
+                (new GenericHttpProvider())->generate($this->request(), $config);
+                $this->fail('expected the job URL to be refused: ' . $job_url);
+            } catch (BadResponseException $e) {
+                $this->assertCount(1, WP::$http_calls, 'only the submit was sent for ' . $job_url);
+            }
+        }
+
+        // The submit took 25 of the 30 seconds: polling stops at the same deadline.
+        WP::$http_calls = [];
+        WP::$http = function (string $url, array $args) use (&$now): array {
+            if ($args['method'] === 'POST') {
+                $now += 25;
+                return ['response' => ['code' => 201], 'body' => '{"urls":{"get":"https://api.images.example.com/v1/jobs/j9"}}'];
+            }
+            return ['response' => ['code' => 200], 'body' => '{"status":"processing"}'];
+        };
+        $start = $now;
+        try {
+            (new GenericHttpProvider())->generate($this->request(), $config);
+            $this->fail('expected a timeout');
+        } catch (TransientException $e) {
+            $this->assertTrue($e->isTimeout());
+        }
+        $this->assertLessThanOrEqual($start + 30, $now, 'submit and polls together stay inside the request timeout');
+        foreach (array_slice(WP::$http_calls, 1) as $call) {
+            $this->assertLessThanOrEqual(30, $call['args']['timeout']);
+        }
+    }
+
+    public function test_endpoint_resolving_to_a_private_address_is_a_config_error(): void
+    {
+        \IndianOpinion\FeaturedFromPrompt\Downloader::set_resolver(static fn (string $host): array => ['192.168.1.20']);
+        $this->expectException(ConfigException::class);
+        (new GenericHttpProvider())->generate($this->request(), $this->config());
+    }
+
     protected function tearDown(): void
     {
         GenericHttpProvider::set_poll_hooks(null, null);

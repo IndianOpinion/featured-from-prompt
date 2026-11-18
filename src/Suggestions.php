@@ -45,7 +45,13 @@ final class Suggestions
      */
     public static function store(int $post_id, CheckedImage $image, array $record): int
     {
-        $dir = Paths::ensure_private_dir();
+        try {
+            $dir = Paths::ensure_private_dir();
+        } catch (\RuntimeException $e) {
+            ImageChecker::remove($image->path);
+            Plugin::logger()->notice('Private directory refused; nothing stored.', ['error' => $e->getMessage()]);
+            throw new CheckFailed(Reason::STORE_FAILED, $e->getMessage());
+        }
         $path = $dir . '/' . Paths::random_name($image->ext);
         if (!rename($image->path, $path)) {
             if (!copy($image->path, $path)) {
@@ -221,7 +227,7 @@ final class Suggestions
         if (!self::is_generated($attachment_id) || self::state($attachment_id) !== 'pending') {
             return;
         }
-        if ((int) get_post_field('post_parent', $attachment_id) !== $object_id) {
+        if (!self::person_may_pick($attachment_id, $object_id)) {
             return;
         }
         Guard::run(static function () use ($attachment_id, $object_id): void {
@@ -230,6 +236,48 @@ final class Suggestions
             }
             self::finish_accept($attachment_id, $object_id, 0, get_current_user_id(), 0);
         });
+    }
+
+    /**
+     * Case 65 gate, on the update_post_metadata and add_post_metadata
+     * filters: a pending suggestion may become a featured image outside
+     * Accept only when a person who could accept it picks it for its own
+     * post. Any other write (code, cron, another post, a user without the
+     * capabilities) is refused before it happens.
+     *
+     * @param mixed $check
+     * @param mixed $object_id
+     * @param mixed $meta_key
+     * @param mixed $meta_value
+     * @return mixed
+     */
+    public static function guard_thumbnail_write($check, $object_id, $meta_key, $meta_value)
+    {
+        if ($meta_key !== '_thumbnail_id' || Guard::active() || $check !== null) {
+            return $check;
+        }
+        $attachment_id = is_numeric($meta_value) ? (int) $meta_value : 0;
+        if (!self::is_generated($attachment_id) || self::state($attachment_id) !== 'pending') {
+            return $check;
+        }
+        $post_id = (int) $object_id;
+        if (self::person_may_pick($attachment_id, $post_id)) {
+            return $check;
+        }
+        Plugin::logger()->notice('Refused to set a pending suggestion as a featured image outside Accept.', [
+            'post_id' => $post_id,
+            'attachment_id' => $attachment_id,
+            'user_id' => get_current_user_id(),
+        ]);
+        return false;
+    }
+
+    private static function person_may_pick(int $attachment_id, int $post_id): bool
+    {
+        return get_current_user_id() > 0
+            && (int) get_post_field('post_parent', $attachment_id) === $post_id
+            && current_user_can('edit_post', $post_id)
+            && current_user_can('upload_files');
     }
 
     /** Delete the private file when its attachment is deleted. */
@@ -311,7 +359,7 @@ final class Suggestions
             return Reason::FILE_MISSING;
         }
         try {
-            $target = Paths::publish($file, Plugin::clock()->now());
+            $target = Paths::publish($file, Plugin::clock()->now(), (string) get_post_mime_type($attachment_id));
         } catch (\RuntimeException $e) {
             Plugin::logger()->notice('Accept could not move the file into uploads.', ['attachment_id' => $attachment_id, 'error' => $e->getMessage()]);
             return Reason::STORE_FAILED;

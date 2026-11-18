@@ -39,6 +39,8 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
         self::remove_tree(WP::$root . '/wp-content');
         self::remove_tree(WP::$root . '/uploads');
 
+        // No real DNS in unit tests; tests that need a name to resolve set their own.
+        \IndianOpinion\FeaturedFromPrompt\Downloader::set_resolver(static fn (string $host): array => []);
         $this->storage = new MemoryStorage();
         $this->clock = new FrozenClock();
         $this->registry = new Registry();

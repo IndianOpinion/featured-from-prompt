@@ -113,22 +113,28 @@ route, with plain DOM calls and no build step.
    then. This replaces `media_handle_sideload` at store time (case 56): an
    offload plugin must never receive an unreviewed image. Deleting a
    suggestion deletes its private file through `delete_attachment`.
-5. **No per-user caps; spend-meter's hooks when present.** The worker calls
-   `spend_meter_pre_spend` with the intent in case 33 and, for every allowed
-   decision, fires exactly one of `spend_meter_record` (the call was sent)
-   or `spend_meter_release` (it was not). The site and post caps and the
-   kill switch always apply first.
+5. **No per-user caps; spend-meter's hooks when present.** The worker
+   applies `spend_meter_pre_spend` with the intent in case 33 (the model is
+   the provider id when none is set, because spend-meter requires one) and,
+   for every allowed decision, fires exactly one of `spend_meter_record`
+   with one call array (the call was sent; status `ok`, `error_billed` or
+   `error_unbilled`) or `spend_meter_release` with the reservation id (it
+   was not sent). Provider cost is not forwarded, because spend-meter takes
+   nanos and providers report their own units. The site and post caps and
+   the kill switch always apply first. The settings screen's provider test
+   goes through the same gate.
 6. **No embedded provenance in 0.1.0.** Generated images are marked in
    attachment meta at store time and exposed through `is_generated()` and
    the REST field. Writing IPTC digital source type or a content credential
    into the file is a roadmap item.
-7. **A soft filter for prompt-library.** When prompt-library is present
-   (constant `PROMPT_LIBRARY_VERSION`, or a callback on
-   `prompt_library_get_template`), the template comes from
-   `apply_filters('prompt_library_get_template', null,
-   'featured-from-prompt/featured-image', ['post_id', 'default'])`; a
-   non-string answer keeps the setting. Our own `ffp_prompt_template` filter
-   runs after it either way.
+7. **A soft filter for prompt-library.** The plugin applies
+   `promptlib_render` with `null`, the slug `featured-from-prompt` (filter
+   `ffp_prompt_library_slug`), the template variables as values, version
+   `live` and the consumer `featured-from-prompt`. An answer with a `user`
+   string becomes the prompt (the `system` part, if any, goes first) and
+   then gets the same clean-up, cut and `ffp_prompt` filter. `null` (plugin
+   absent), `promptlib_not_found` or any other `WP_Error` (logged) keeps the
+   own template, after our `ffp_prompt_template` filter.
 8. **Accept warns when another editor holds the post lock and proceeds on
    confirmation.** `accept()` reads `_edit_lock` with the same 150 second
    window as `wp_check_post_lock()` (for the accepting user rather than the
@@ -137,20 +143,21 @@ route, with plain DOM calls and no build step.
    resends with `confirm_lock`. WP-CLI uses `--yes`. The history entry
    notes that the accept went over a lock.
 
-### Assumptions about the soft integrations
+### Companion contracts
 
-The PRD names `spend_meter_pre_spend` and `gen_queue_enqueue_job`. The
-other hook names below are this plugin's side of the contract and should
-be checked against the released `spend-meter`, `gen-queue` and
-`prompt-library` interfaces before 1.0:
+Checked against the released `spend-meter`, `gen-queue` and
+`prompt-library` 0.1.0 READMEs and PRDs:
 
-- `spend_meter_record($intent, $decision, ['units', 'provider_cost'])` and
-  `spend_meter_release($intent, $decision)`.
-- gen-queue handler registration through the `gen_queue_job_handlers`
-  filter (job type to callable). The job payload is `{request_id,
-  post_id}`. Detection is `GEN_QUEUE_VERSION`, overridable with
-  `ffp_use_gen_queue`.
-- `prompt_library_get_template` as above.
+- spend-meter: `spend_meter_pre_spend` (filter, `null` and an intent array),
+  `spend_meter_record` (action, one call array), `spend_meter_release`
+  (action, the reservation id). `SPEND_METER_API` is 1. `null` means absent.
+- gen-queue: `gen_queue_enqueue_job` (filter, `null`, type, payload, args)
+  returns a job id, `null` or a `WP_Error`. The handler is registered on
+  `gen_queue_register_types` with `gen_queue_register_type()` and receives
+  the `Job` (payload `{request_id, post_id}`) and its context. One attempt
+  per job; the worker keeps its own retries. Detection is
+  `GEN_QUEUE_VERSION`, overridable with `ffp_use_gen_queue`.
+- prompt-library: `promptlib_render` as in ruling 7.
 
 ### Other decisions
 
@@ -198,8 +205,25 @@ be checked against the released `spend-meter`, `gen-queue` and
 - **Retention `-1` means keep forever** (the PRD's "or keep").
 - **Media modal picks.** Pending suggestions are hidden from the picker by
   default. If an editor picks one anyway, the pick is treated as Accept: the
-  file is published into uploads and the states change. A pick for a
-  different post than the suggestion's parent is ignored.
+  file is published into uploads and the states change. A write of a pending
+  suggestion to `_thumbnail_id` is refused before it happens (on
+  `update_post_metadata` and `add_post_metadata`) unless the current user
+  can edit that post and upload files and the post is the suggestion's
+  parent. Code, cron and other posts cannot make a pending image featured.
+- **Downloads follow redirects themselves.** WordPress's safe mode lets
+  link-local addresses (cloud metadata) through and checks redirects the
+  same way, so the plugin sets `redirection` to 0, follows up to 3 hops
+  itself, and checks every hop for HTTPS and a public address, literal or
+  resolved. The poll URL and the endpoint get the same check.
+- **One deadline for submit-then-poll.** Polling stops at the request
+  timeout counted from the submit, so the whole call stays inside the post
+  lock and the lost-worker window.
+- **Fail closed on the private directory.** Inside uploads, a `..` in the
+  path, or deny files that cannot be written: nothing is stored
+  (`store_failed`). Only names the plugin makes, directly in the directory,
+  count as private, so nothing else is streamed by the preview route or
+  deleted with an attachment. Accept re-sniffs the bytes against the
+  extension and the attachment MIME type before the move into uploads.
 - **REST nonces.** WordPress core checks the cookie nonce before any
   permission callback runs, so a bad REST nonce surfaces as core's own
   `rest_cookie_invalid_nonce`. Admin forms check their own nonces and
